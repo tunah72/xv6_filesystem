@@ -379,12 +379,14 @@ iunlockput(struct inode *ip)
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
 // returns 0 if out of disk space.
+
 static uint
 bmap(struct inode *ip, uint bn)
 {
   uint addr, *a;
   struct buf *bp;
 
+  // 1. DIRECT BLOCKS (0..10)
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
       addr = balloc(ip->dev);
@@ -396,24 +398,75 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
+  // 2. SINGLY-INDIRECT BLOCK (11)
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
+    // Load block chua danh sach (nam o slot 11)
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
       ip->addrs[NDIRECT] = addr;
     }
+    // Doc block do len
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
+    
+    // Tìm block con
     if((addr = a[bn]) == 0){
       addr = balloc(ip->dev);
       if(addr){
         a[bn] = addr;
-        log_write(bp);
+        log_write(bp); // Ghi log vi da thay doi noi dung block
       }
     }
-    brelse(bp);
+    brelse(bp); // Giai phong block
+    return addr;
+  }
+  bn -= NINDIRECT;
+
+  // 3. DOUBLY-INDIRECT BLOCK (12) - NEWLY ADDED
+  if(bn < NINDIRECT * NINDIRECT){
+    // Lay/Tao block cap 1 (Doubly indirect block) tai slot 12
+    if((addr = ip->addrs[NDIRECT+1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = addr;
+    }
+
+    // Doc block cap 1
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // Tinh index cap 1
+    uint idx_lv1 = bn / NINDIRECT;
+    uint idx_lv2 = bn % NINDIRECT;
+
+    // Lay/Tao block cap 2 (Singly indirect block con)
+    if((addr = a[idx_lv1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0){
+        brelse(bp); // Luon nho release block truoc khi return loi
+        return 0;
+      }
+      a[idx_lv1] = addr;
+      log_write(bp); // Ghi nhan thay doi block cap 1
+    }
+    brelse(bp); // Xong voi block cap 1, giai phong nó
+
+    // Doc block cap 2 (vua lay duoc dia chi o tren)
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // LLay/Tao Data Block thuc su
+    if((addr = a[idx_lv2]) == 0){
+      addr = balloc(ip->dev);
+      if(addr){
+        a[idx_lv2] = addr;
+        log_write(bp); // Ghi nhan thay doi block cap 2
+      }
+    }
+    brelse(bp); // Giai phong block cap 2
     return addr;
   }
 
@@ -422,13 +475,16 @@ bmap(struct inode *ip, uint bn)
 
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
+// kernel/fs.c
+
 void
 itrunc(struct inode *ip)
 {
   int i, j;
-  struct buf *bp;
-  uint *a;
+  struct buf *bp, *bp2; // Can them con tro bp2 cho lop thu 2
+  uint *a, *a2;         // Can them con tro a2
 
+  // 1. Free Direct Blocks
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
       bfree(ip->dev, ip->addrs[i]);
@@ -436,6 +492,7 @@ itrunc(struct inode *ip)
     }
   }
 
+  // 2. Free Singly-Indirect Block
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
@@ -446,6 +503,33 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // 3. Free Doubly-Indirect Block (NEWLY ADDED)
+  if(ip->addrs[NDIRECT+1]){
+    // Đọc block cấp 1
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+
+    // Duyet qua tung entry trong block cap 1
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        // Neu entry ton tai, no tro toi block cap 2. Doc block cap 2 len.
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+
+        // Duyet qua block cap 2 de free data blocks
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2); // Giai phong buffer block cap 2
+        bfree(ip->dev, a[i]); // Free block cap 2 trên dia
+      }
+    }
+    brelse(bp); // Giai phong buffer block cap 1
+    bfree(ip->dev, ip->addrs[NDIRECT+1]); // Free block cap 1 trên dia
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;
