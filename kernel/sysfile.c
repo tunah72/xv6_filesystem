@@ -338,7 +338,7 @@ start:
     }
   }
   
-  if(ip->type == T_SYMLINK && omode != O_NOFOLLOW){
+  if (ip->type==T_SYMLINK && !(omode&O_NOFOLLOW)){
     symlink_depth++;
     if (symlink_depth > 10){
       iunlockput(ip);
