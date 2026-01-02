@@ -257,20 +257,25 @@ iappend(uint inum, void *xp, int n)
   struct dinode din;
   char buf[BSIZE];
   uint indirect[NINDIRECT];
+  uint doubly_indirect[NINDIRECT]; // Thêm buffer cho lớp Doubly
   uint x;
 
   rinode(inum, &din);
   off = xint(din.size);
-  // printf("append inum %d at off %d sz %d\n", inum, off, n);
+  
   while(n > 0){
     fbn = off / BSIZE;
     assert(fbn < MAXFILE);
+
+    // 1. DIRECT BLOCK (0 -> 10)
     if(fbn < NDIRECT){
       if(xint(din.addrs[fbn]) == 0){
         din.addrs[fbn] = xint(freeblock++);
       }
       x = xint(din.addrs[fbn]);
-    } else {
+    } 
+    // 2. SINGLY-INDIRECT BLOCK (11 -> 266)
+    else if(fbn < NDIRECT + NINDIRECT) {
       if(xint(din.addrs[NDIRECT]) == 0){
         din.addrs[NDIRECT] = xint(freeblock++);
       }
@@ -281,6 +286,41 @@ iappend(uint inum, void *xp, int n)
       }
       x = xint(indirect[fbn-NDIRECT]);
     }
+    // 3. DOUBLY-INDIRECT BLOCK (267 trở đi) - PHẦN SỬA QUAN TRỌNG
+    else {
+      // Bước A: Lấy/Tạo block Doubly Indirect (nằm ở slot NDIRECT+1)
+      if(xint(din.addrs[NDIRECT+1]) == 0){
+        din.addrs[NDIRECT+1] = xint(freeblock++);
+      }
+      
+      // Đọc nội dung block Doubly Indirect (Level 1)
+      rsect(xint(din.addrs[NDIRECT+1]), (char*)doubly_indirect);
+      
+      // Tính toán index trong Level 1 và Level 2
+      // Số block tính từ đầu vùng Double
+      uint double_offset = fbn - NDIRECT - NINDIRECT; 
+      uint idx_lv1 = double_offset / NINDIRECT;
+      uint idx_lv2 = double_offset % NINDIRECT;
+
+      // Bước B: Lấy/Tạo block Singly Indirect con (Level 2)
+      if(doubly_indirect[idx_lv1] == 0) {
+          doubly_indirect[idx_lv1] = xint(freeblock++);
+          // Cập nhật lại Level 1 xuống đĩa
+          wsect(xint(din.addrs[NDIRECT+1]), (char*)doubly_indirect);
+      }
+
+      // Đọc nội dung block Singly Indirect con
+      rsect(xint(doubly_indirect[idx_lv1]), (char*)indirect);
+
+      // Bước C: Lấy/Tạo Data block thực sự
+      if(indirect[idx_lv2] == 0){
+          indirect[idx_lv2] = xint(freeblock++);
+          // Cập nhật lại Level 2 xuống đĩa
+          wsect(xint(doubly_indirect[idx_lv1]), (char*)indirect);
+      }
+      x = xint(indirect[idx_lv2]);
+    }
+
     n1 = min(n, (fbn + 1) * BSIZE - off);
     rsect(x, buf);
     bcopy(p, buf + off - (fbn * BSIZE), n1);
